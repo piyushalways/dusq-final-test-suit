@@ -1,41 +1,74 @@
-# nrf54l15
+# nRF54L15 Firmware (EMS + BLE + PPG)
 
-## test details
-# Firmware Test Suite Matrix (Portable, No Unit-Only Algo Tests)
+## Overview
+This firmware runs on `nrf54l15dk` and integrates:
 
-| Level | Suite Name | Scope | What It Validates | Method | Dependencies | Execution Target | Frequency | Pass Criteria | Portability Notes |
-|---|---|---|---|---|---|---|---|---|---|
-| L1 | Message Path Integration | BLE write parsing -> queue payload shaping | Correct BLE characteristic write mapping, message IDs, payload conversion, queue enqueue behavior | ztest + mocks/stubs | Mock BLE, mock queue, minimal wrappers | Simulator (`native_sim`) | Every PR | 100% test pass, no dropped/invalid mapped command | Keep UUID-to-message mapping test vectors in shared file for reuse across versions |
-| L1 | PPG Control Integration | PPG command flow from BLE/start-stop path | Correct transition requests (`START`, `STOP`), command queue semantics, invalid command handling | ztest + mocks/stubs | Mock AS7058 API, mock queue, mock logger | Simulator | Every PR | Valid commands enqueue correctly, invalid commands rejected safely | Reuse same command contract in all branches/releases |
-| L1 | Flash Read/Stream Control Integration | Flash control command path | Start/resume/reset behavior, transfer state machine transitions, resume offset integrity | ztest + flash/BLE stubs | Mock flash read/write, mock notify path | Simulator | Every PR | State transitions match contract, no illegal state transitions | Keep transfer-state contract stable via shared enum test cases |
-| L2 | RTOS Runtime Stability | Thread/queue/timer behavior under load | Queue pressure handling, timer jitter tolerance, no deadlocks, watchdog heartbeat continuity | On-target scenario tests | Real RTOS, optional telemetry hooks | Dev board | Nightly | No deadlock/reset in test window, watchdog fed correctly | Same scenarios reusable; only board config changes |
-| L2 | Connectivity Robustness | BLE connect/disconnect/reconnect loops | Recovery after disconnects, re-advertising correctness, reconnect reliability | On-target scripted test | BLE central script + board | Dev board + phone/dongle | Nightly | Success rate >= 99% over N cycles, no stuck advertising state | Keep test script transport-agnostic (nRF/Android/iOS variants) |
-| L2 | Data Pipeline Robustness | Sensor ingest -> processing -> BLE/flash | Sustained data flow without starvation, bounded drops, graceful backpressure | On-target stress run | Real sensors or sensor replay source | Dev board | Nightly | Meets configured drop/loss thresholds, no crash/assert | Thresholds configurable by product version |
-| L3 | Hardware-In-Loop Driver Validation | AS7058, BMA580, nPM1300, PWM, flash timing | Driver init/recovery, IRQ handling, bus stability, timing margin | HIL automated script | Real hardware setup | Dedicated HIL rig | Nightly/Weekly | No fatal driver faults, timing within limits, recoverable transient errors | Keep hardware abstraction in scripts for board revision portability |
-| L3 | Power/Sleep-Wake Reliability | Sleep entry/exit and restore | Safe prepare-for-sleep behavior, wake source handling, state restoration | HIL scenario test | PMIC, wake lines, persistent storage | HIL rig | Nightly | Correct wake reason handling, no boot loops, state restored as designed | Store expected wake/restore contracts in shared YAML |
-| L3 | Endurance/Soak | Long-duration runtime | Memory stability, queue stability, flash behavior, watchdog continuity | 8h/24h soak | Full firmware runtime | HIL rig | Weekly | No crash/reset leaks, acceptable performance drift | Same soak profile reusable; thresholds versioned |
-| L3 | Fault Injection | Controlled failures | Safe handling of I2C/flash/BLE faults and partial data errors | Fault-injection hooks + HIL | Injected bus errors/timeouts | HIL rig | Weekly | No undefined state, graceful degradation, recoverability verified | Keep fault catalog shared across versions |
-| L4 | Release Gate Regression | Full critical path regression | End-to-end confidence before release | Aggregated run of critical suites | CI + HIL infra | CI + HIL | Release candidate | All critical suites pass, no Sev-1/Sev-2 open defects | Same release gate checklist reused for previous/next versions |
+- EMS waveform generation and control
+- BLE control/telemetry (including flash data streaming)
+- PPG + accelerometer processing pipeline
+- Power management (sleep/wake via PMIC)
+- Watchdog-based runtime health checks
 
-## Global Quality Gates
-| Gate | Threshold |
+## Runtime Data Flow
+1. BLE writes commands (EMS/PPG/flash control).
+2. Commands are parsed and pushed to internal message queues.
+3. Main/PPG threads consume queue messages and update runtime state.
+4. Sensor and algorithm pipeline produces PPG/features.
+5. Data is streamed over BLE and/or stored in flash.
+6. Watchdog and health logic monitor thread liveness.
+
+## Test Strategy (Portable)
+Unit-only algorithm tests are intentionally excluded for now.  
+Focus is on integration, runtime robustness, HIL, and release gates.
+
+### Test Flow
+1. PR: run fast L1 integration suites on simulator.
+2. Nightly: run L1 + selected L2/L3 on hardware.
+3. Weekly: run full L2/L3 including soak and fault injection.
+4. Release: run L4 regression gate (must fully pass).
+
+## Compact Test Matrix
+
+| Level | Suite | Runs On | Trigger | Primary Goal |
+|---|---|---|---|---|
+| L1 | Message Path Integration | Simulator | Every PR | Validate BLE write parsing -> queue payload shaping |
+| L1 | PPG Control Integration | Simulator | Every PR | Validate START/STOP command mapping and queue behavior |
+| L1 | Flash Stream Control Integration | Simulator | Every PR | Validate start/resume/reset transfer state behavior |
+| L2 | RTOS Runtime Stability | Dev board | Nightly | Validate queue/timer/thread behavior under load |
+| L2 | Connectivity Robustness | Dev board | Nightly | Validate connect/disconnect/reconnect recovery |
+| L2 | Data Pipeline Robustness | Dev board | Nightly | Validate sustained ingest/process/stream behavior |
+| L3 | Driver HIL Validation | HIL rig | Nightly/Weekly | Validate AS7058/BMA580/nPM1300/PWM/flash timing paths |
+| L3 | Power Sleep/Wake Reliability | HIL rig | Nightly | Validate sleep entry/exit and state restore behavior |
+| L3 | Endurance/Soak | HIL rig | Weekly | Validate long-run stability (memory/queues/watchdog) |
+| L3 | Fault Injection | HIL rig | Weekly | Validate graceful recovery from bus/flash/BLE faults |
+| L4 | Release Regression Gate | CI + HIL | Release | Validate end-to-end critical path before shipping |
+
+## What Each Suite Does
+- `Message Path Integration`: Feeds BLE write inputs and verifies correct internal message ID/payload shaping and queue insertion.
+- `PPG Control Integration`: Verifies BLE PPG control commands (`START/STOP`) map to correct command queue behavior.
+- `Flash Stream Control Integration`: Verifies flash transfer control flow (`start/resume/reset`) and legal transfer state transitions.
+- `RTOS Runtime Stability`: Stress-checks thread/queue/timer behavior to catch deadlocks, starvation, and watchdog feed issues.
+- `Connectivity Robustness`: Repeats connect/disconnect/reconnect cycles to verify advertising restart and link recovery.
+- `Data Pipeline Robustness`: Validates sustained sensor ingest -> processing -> BLE/flash path under realistic load.
+- `Driver HIL Validation`: Validates real hardware driver behavior (AS7058/BMA580/nPM1300/PWM/flash timing) on target setup.
+- `Power Sleep/Wake Reliability`: Verifies sleep entry/exit, wake-source handling, and state restoration after wake/reset.
+- `Endurance/Soak`: Runs long-duration scenarios (8h/24h) to catch leaks, drift, and runtime instability.
+- `Fault Injection`: Injects controlled flash/I2C/BLE faults and verifies graceful degradation and recovery paths.
+- `Release Regression Gate`: Executes critical-path end-to-end suite as final release blocker.
+
+## Quality Gates
+
+| Metric | Target |
 |---|---|
-| Integration suite pass rate | 100% |
-| HIL critical suite pass rate | 100% |
-| Reconnect reliability | >= 99% over defined cycle count |
-| Runtime crash/assert count | 0 during qualified runs |
-| Watchdog unexpected reset count | 0 during qualified runs |
-| Data loss metric | Must remain within product-defined threshold |
+| Integration pass rate | 100% |
+| HIL critical pass rate | 100% |
+| Reconnect reliability | >= 99% (configured cycle test) |
+| Runtime crash/assert count | 0 |
+| Unexpected watchdog reset | 0 |
+| Data loss | Within product threshold |
 
-## Execution Policy
-| Trigger | Suites |
-|---|---|
-| Every PR | L1 suites |
-| Nightly | L1 + selected L2 + selected L3 |
-| Weekly | Full L2/L3 including soak and fault injection |
-| Release | L4 full regression gate |
-
-## Notes
-- Unit-only algorithm tests are intentionally excluded per current decision.
-- Keep all contracts (message mapping, state transitions, thresholds) in versioned test data files to maximize portability.
-- Prefer simulator for fast feedback and HIL for truth validation.
+## Portability Rules
+- Keep tests under `tests/` with independent configs.
+- Keep interface contracts versioned (message IDs, state transitions, thresholds).
+- Use simulator for fast feedback; HIL for hardware truth.
+- Reuse the same matrix across previous/next firmware versions.
